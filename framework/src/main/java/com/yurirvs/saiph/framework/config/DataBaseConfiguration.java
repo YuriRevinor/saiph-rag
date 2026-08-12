@@ -1,0 +1,34 @@
+package com.yurirvs.saiph.framework.config;
+
+import com.baomidou.mybatisplus.annotation.DbType;
+import com.baomidou.mybatisplus.core.handlers.MetaObjectHandler;
+import com.baomidou.mybatisplus.extension.plugins.MybatisPlusInterceptor;
+import com.baomidou.mybatisplus.extension.plugins.inner.PaginationInnerInterceptor;
+import com.yurirvs.saiph.framework.database.SaiphMetaObjectHandler;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+
+/**
+ *Mybatis-Plus 配置
+ */
+@Configuration
+public class DataBaseConfiguration {
+
+    /**
+     * MyBatis-Plus PostgreSQL 分页插件
+     */
+    @Bean
+    public MybatisPlusInterceptor mybatisPlusInterceptor() {
+        MybatisPlusInterceptor interceptor = new MybatisPlusInterceptor();
+        interceptor.addInnerInterceptor(new PaginationInnerInterceptor(DbType.POSTGRE_SQL));
+        return interceptor;
+    }
+
+    /**
+     * MyBatis-Plus 源数据自动填充类
+     */
+    @Bean
+    public MetaObjectHandler myMetaObjectHandler() {
+        return new SaiphMetaObjectHandler();
+    }
+}
