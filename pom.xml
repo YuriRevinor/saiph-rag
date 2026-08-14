@@ -10,6 +10,7 @@
     <packaging>pom</packaging>
     <modules>
         <module>framework</module>
+        <module>rag</module>
     </modules>
 
     <properties>
@@ -272,14 +273,6 @@
                 <groupId>com.diffplug.spotless</groupId>
                 <artifactId>spotless-maven-plugin</artifactId>
                 <version>${spotless-maven-plugin.version}</version>
-                <configuration>
-                    <java>
-                        <licenseHeader>
-                            <!-- ${maven.multiModuleProjectDirectory} 爆红属于正常，并不影响编译或者运行，忽略就好 -->
-                            <file>${maven.multiModuleProjectDirectory}/resources/format/copyright.txt</file>
-                        </licenseHeader>
-                    </java>
-                </configuration>
                 <executions>
                     <execution>
                         <goals>

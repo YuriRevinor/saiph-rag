@@ -7,7 +7,7 @@ import com.yurirvs.saiph.framework.exception.ClientException;
 /**
  * 跨线程用户上下文容器
  */
-public class UserContext {
+public final class UserContext {
 
     private static final TransmittableThreadLocal<LoginUser> CONTEXT = new TransmittableThreadLocal<>();
 

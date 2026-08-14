@@ -1,0 +1,49 @@
+server:
+  port: 9090
+  servlet:
+    context-path: /api/saiph
+
+spring:
+  application:
+    name: saiph-service
+
+  servlet:
+    multipart:
+      max-file-size: 50MB
+      max-request-size: 100MB
+
+  datasource:
+    driver-class-name: org.postgresql.Driver
+    type: com.zaxxer.hikari.HikariDataSource
+    username: postgres
+    password: postgres
+    url: jdbc:postgresql://192.168.200.11:5432/saiph?client_encoding=UTF8
+    hikari:
+      connection-timeout: 5000
+      idle-timeout: 600000
+      max-lifetime: 1800000
+      maximum-pool-size: 10
+      minimum-idle: 5
+      pool-name: SapihHikariPool
+
+  data:
+    redis:
+      host: 192.168.200.11
+      port: 6379
+      password: 123456
+
+rocketmq:
+  name-server: 192.168.200.11:9876
+  producer:
+    group: saiph-producer_pg
+    send-message-timeout: 2000
+
+sa-token:
+  token-name: Authorization
+  timeout: 2592000
+  is-concurrent: true
+  is-share: false
+  token-style: simple-uuid
+  is-log: false
+  is-print: false
+
