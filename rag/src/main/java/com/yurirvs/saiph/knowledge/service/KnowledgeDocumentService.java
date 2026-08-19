@@ -15,4 +15,14 @@ public interface KnowledgeDocumentService {
      * @return 知识库文档视图对象
      */
     KnowledgeDocumentVO upload(String kbId, KnowledgeDocumentUploadDTO requestParam, MultipartFile file);
+
+    void startChunk(String docId);
+
+    /**
+     * 执行文档分块（由 MQ 消费者调用）
+     * 获取分布式锁 → 清理历史分块和向量 → 执行完整分块流程
+     *
+     * @param docId 文档 ID
+     */
+    void executeChunk(String docId);
 }

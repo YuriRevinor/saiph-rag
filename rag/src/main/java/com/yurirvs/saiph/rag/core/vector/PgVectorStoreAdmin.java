@@ -1,9 +1,6 @@
-package com.yurirvs.saiph.knowledge.core.vector;
+package com.yurirvs.saiph.rag.core.vector;
 
-import com.yurirvs.saiph.knowledge.config.RAGDefaultProperties;
-import com.yurirvs.saiph.rag.core.vector.VectorSpaceId;
-import com.yurirvs.saiph.rag.core.vector.VectorSpaceSpec;
-import com.yurirvs.saiph.rag.core.vector.VectorStoreAdmin;
+import com.yurirvs.saiph.rag.config.RAGDefaultProperties;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;

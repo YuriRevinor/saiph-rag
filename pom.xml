@@ -11,6 +11,7 @@
     <modules>
         <module>framework</module>
         <module>rag</module>
+        <module>infra</module>
     </modules>
 
     <properties>

@@ -18,7 +18,7 @@ import org.springframework.web.multipart.MultipartFile;
 @RequiredArgsConstructor
 public class KnowledgeDocumentController {
 
-    private KnowledgeDocumentService documentService;
+    private final KnowledgeDocumentService documentService;
 
     /**
      * 上传文档：入库记录 + 文件落盘，返回文档ID
@@ -28,5 +28,14 @@ public class KnowledgeDocumentController {
                                               @RequestPart(value = "file", required = false) MultipartFile file,
                                               @ModelAttribute KnowledgeDocumentUploadDTO requestParam) {
         return Results.success(documentService.upload(kbId, requestParam, file));
+    }
+
+    /**
+     * 开始分块：抽取文本 -> 分块 -> 嵌入并写入向量库
+     */
+    @PostMapping("/knowledge-base/docs/{doc-id}/chunk")
+    public Result<Void> startChunk(@PathVariable(value = "doc-id") String docId) {
+        documentService.startChunk(docId);
+        return Results.success();
     }
 }
