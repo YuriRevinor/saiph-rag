@@ -39,4 +39,5 @@ build/
 ### Mac OS ###
 .DS_Store
 
+# Local application configuration
 /rag/src/main/resources/application.yml
