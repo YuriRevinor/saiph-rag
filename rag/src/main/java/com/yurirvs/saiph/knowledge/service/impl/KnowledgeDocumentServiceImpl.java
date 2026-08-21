@@ -354,5 +354,12 @@ public class KnowledgeDocumentServiceImpl implements KnowledgeDocumentService {
         }
         return vo;
     }
+
+    public void chunkDocument(KnowledgeDocumentDO documentDO) {
+        if (documentDO == null) {
+            return;
+        }
+        runChunkTask(documentDO);
+    }
 }
 
