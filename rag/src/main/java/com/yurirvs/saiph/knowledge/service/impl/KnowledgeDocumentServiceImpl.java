@@ -1,27 +1,43 @@
 package com.yurirvs.saiph.knowledge.service.impl;
 
 import cn.hutool.core.bean.BeanUtil;
+import cn.hutool.core.collection.CollUtil;
 import cn.hutool.core.lang.Assert;
 import cn.hutool.core.util.StrUtil;
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
+import com.baomidou.mybatisplus.core.metadata.IPage;
+import com.baomidou.mybatisplus.core.toolkit.Wrappers;
+import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.mzt.logapi.starter.annotation.LogRecord;
 import com.yurirvs.saiph.audit.constant.BizChangeBizType;
 import com.yurirvs.saiph.audit.constant.BizChangeOperationType;
 import com.yurirvs.saiph.audit.support.BizChangeLogContext;
+import com.yurirvs.saiph.core.chunk.model.EmbeddedChunk;
 import com.yurirvs.saiph.core.ingest.*;
+import com.yurirvs.saiph.core.ingest.sink.ChunkIndexWriter;
 import com.yurirvs.saiph.core.parser.registry.ParserRegistry;
 import com.yurirvs.saiph.framework.context.UserContext;
 import com.yurirvs.saiph.framework.exception.ClientException;
 import com.yurirvs.saiph.framework.exception.ServiceException;
 import com.yurirvs.saiph.framework.mq.producer.MessageQueueProducer;
+import com.yurirvs.saiph.ingestion.dao.entity.IngestionPipelineDO;
+import com.yurirvs.saiph.ingestion.dao.mapper.IngestionPipelineMapper;
 import com.yurirvs.saiph.ingestion.service.IngestionPipelineService;
 import com.yurirvs.saiph.knowledge.config.KnowledgeScheduleProperties;
+import com.yurirvs.saiph.knowledge.controller.dto.KnowledgeDocumentPageDTO;
+import com.yurirvs.saiph.knowledge.controller.dto.KnowledgeDocumentUpdateDTO;
 import com.yurirvs.saiph.knowledge.controller.dto.KnowledgeDocumentUploadDTO;
+import com.yurirvs.saiph.knowledge.controller.vo.KnowledgeDocumentChunkLogVO;
+import com.yurirvs.saiph.knowledge.controller.vo.KnowledgeDocumentSearchVO;
 import com.yurirvs.saiph.knowledge.controller.vo.KnowledgeDocumentVO;
 import com.yurirvs.saiph.knowledge.dao.entity.KnowledgeBaseDO;
+import com.yurirvs.saiph.knowledge.dao.entity.KnowledgeChunkDO;
 import com.yurirvs.saiph.knowledge.dao.entity.KnowledgeDocumentChunkLogDO;
 import com.yurirvs.saiph.knowledge.dao.entity.KnowledgeDocumentDO;
 import com.yurirvs.saiph.knowledge.dao.mapper.KnowledgeBaseMapper;
+import com.yurirvs.saiph.knowledge.dao.mapper.KnowledgeChunkMapper;
 import com.yurirvs.saiph.knowledge.dao.mapper.KnowledgeDocumentChunkLogMapper;
 import com.yurirvs.saiph.knowledge.dao.mapper.KnowledgeDocumentMapper;
 import com.yurirvs.saiph.knowledge.enums.DocumentStatus;
@@ -34,18 +50,22 @@ import com.yurirvs.saiph.knowledge.service.KnowledgeDocumentScheduleService;
 import com.yurirvs.saiph.knowledge.service.KnowledgeDocumentService;
 import com.yurirvs.saiph.knowledge.support.IngestionSpecCodec;
 import com.yurirvs.saiph.knowledge.support.VectorTargetResolver;
+import com.yurirvs.saiph.rag.core.vector.VectorStoreService;
 import com.yurirvs.saiph.rag.dto.StoredFileDTO;
 import com.yurirvs.saiph.rag.service.FileStorageService;
+import com.yurirvs.saiph.rag.util.DisplayType;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionOperations;
 import org.springframework.util.StringUtils;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.io.InputStream;
-import java.util.Date;
+import java.util.*;
+import java.util.stream.Collectors;
 
 @Slf4j
 @Service
@@ -67,6 +87,11 @@ public class KnowledgeDocumentServiceImpl implements KnowledgeDocumentService {
     private final KnowledgeDocumentChunkLogMapper chunkLogMapper;
     private final IngestionKernel ingestionKernel;
     private final TransactionOperations transactionOperations;
+    private final ChunkIndexWriter chunkIndexWriter;
+    private final KnowledgeChunkMapper chunkMapper;
+    private final KnowledgeChunkService knowledgeChunkService;
+    private final VectorStoreService vectorStoreService;
+    private final IngestionPipelineMapper ingestionPipelineMapper;
 
     @Value("knowledge-document-chunk_topic")
     private String chunkTopic;
@@ -229,7 +254,8 @@ public class KnowledgeDocumentServiceImpl implements KnowledgeDocumentService {
             long totalDuration = System.currentTimeMillis() - totalStartTime;
             updateChunkLog(chunkLog.getId(), DocumentStatus.SUCCESS.getCode(), savedCount,
                     extractDuration, chunkDuration, embedDuration, persistDuration, totalDuration, null);
-        } catch (Exception e) {
+        }
+        catch (Exception e) {
             log.error("文档分块任务执行失败：docId={}", docId, e);
             markChunkFailed(documentDO.getId());
             long totalDuration = System.currentTimeMillis() - totalStartTime;
@@ -251,7 +277,8 @@ public class KnowledgeDocumentServiceImpl implements KnowledgeDocumentService {
     private byte[] readFileBytes(KnowledgeDocumentDO documentDO) {
         try (InputStream is = fileStorageService.openStream(documentDO.getFileUrl())) {
             return is.readAllBytes();
-        } catch (Exception e) {
+        }
+        catch (Exception e) {
             throw new ServiceException("读取文件内容失败：docId=" + documentDO.getId());
         }
     }
@@ -310,7 +337,8 @@ public class KnowledgeDocumentServiceImpl implements KnowledgeDocumentService {
             if (CronScheduleHelper.isIntervalLessThan(scheduleCron, new java.util.Date(), scheduleProperties.getMinIntervalSeconds())) {
                 throw new ClientException("定时周期不能小于 " + scheduleProperties.getMinIntervalSeconds() + " 秒");
             }
-        } catch (IllegalArgumentException e) {
+        }
+        catch (IllegalArgumentException e) {
             throw new ClientException("定时表达式不合法");
         }
     }
@@ -326,13 +354,15 @@ public class KnowledgeDocumentServiceImpl implements KnowledgeDocumentService {
         ProcessMode processMode = ProcessMode.normalize(request.getProcessMode());
         if (ProcessMode.CHUNK == processMode) {
             return new ProcessModeConfig(processMode, ingestionSpecCodec.normalize(request.getIngestionSpec()), null);
-        } else {
+        }
+        else {
             if (!StringUtils.hasText(request.getPipelineId())) {
                 throw new ClientException("使用Pipeline模式时，必须指定Pipeline ID");
             }
             try {
                 ingestionPipelineService.get(request.getPipelineId());
-            } catch (Exception e) {
+            }
+            catch (Exception e) {
                 throw new ClientException("指定的Pipeline不存在: " + request.getPipelineId());
             }
             return new ProcessModeConfig(processMode, null, request.getPipelineId());
@@ -360,6 +390,387 @@ public class KnowledgeDocumentServiceImpl implements KnowledgeDocumentService {
             return;
         }
         runChunkTask(documentDO);
+    }
+
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    @LogRecord(
+            success = "删除文档：{{#bizChangeName}}",
+            fail = "删除文档失败：{{#_errorMsg}}",
+            type = BizChangeBizType.KNOWLEDGE_DOCUMENT,
+            subType = BizChangeOperationType.DELETE,
+            bizNo = "{{#docId}}",
+            extra = BizChangeLogContext.SNAPSHOT_EXPRESSION,
+            condition = BizChangeLogContext.RECORD_CONDITION
+    )
+    public void delete(String docId) {
+        KnowledgeDocumentDO documentDO = documentMapper.selectById(docId);
+        Assert.notNull(documentDO, () -> new ClientException("文档不存在"));
+        bizChangeLogContext.putName(documentDO.getDocName());
+        KnowledgeDocumentDO before = BeanUtil.copyProperties(documentDO, KnowledgeDocumentDO.class);
+
+        // 禁止在文档分块运行时删除
+        if (DocumentStatus.RUNNING.getCode().equals(documentDO.getStatus())) {
+            throw new ClientException("文档正在分块中，无法删除");
+        }
+
+        scheduleService.deleteByDocId(docId);
+        chunkLogMapper.delete(Wrappers.lambdaQuery(KnowledgeDocumentChunkLogDO.class)
+                .eq(KnowledgeDocumentChunkLogDO::getDocId, docId));
+
+        documentDO.setDeleted(1);
+        documentDO.setUpdatedBy(UserContext.getUsername());
+        documentMapper.deleteById(documentDO);
+
+        // 一次调用覆盖全部落点：关系库块与向量都在扇出里，未来加索引后端也自动跟随
+        KnowledgeBaseDO kbDO = knowledgeBaseMapper.selectById(documentDO.getKbId());
+        chunkIndexWriter.deleteDocument(vectorTargetResolver.resolve(kbDO), documentRef(documentDO));
+        deleteStoredFileQuietly(documentDO);
+        bizChangeLogContext.put(docId, before, null);
+    }
+
+    private void deleteStoredFileQuietly(KnowledgeDocumentDO documentDO) {
+        if (documentDO == null || !StringUtils.hasText(documentDO.getFileUrl())) {
+            return;
+        }
+        try {
+            fileStorageService.deleteByUrl(documentDO.getFileUrl());
+        }
+        catch (Exception e) {
+            log.warn("删除文档存储文件失败, docId={}, fileUrl={}", documentDO.getId(), documentDO.getFileUrl(), e);
+        }
+    }
+
+    @Override
+    public KnowledgeDocumentVO get(String docId) {
+        KnowledgeDocumentDO documentDO = documentMapper.selectById(docId);
+        Assert.notNull(documentDO, () -> new ClientException("文档不存在"));
+        return toVO(documentDO);
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    @LogRecord(
+            success = "更新文档：{{#bizChangeName}}",
+            fail = "更新文档失败：{{#_errorMsg}}",
+            type = BizChangeBizType.KNOWLEDGE_DOCUMENT,
+            subType = BizChangeOperationType.UPDATE,
+            bizNo = "{{#docId}}",
+            extra = BizChangeLogContext.SNAPSHOT_EXPRESSION,
+            condition = BizChangeLogContext.RECORD_CONDITION
+    )
+    public void update(String docId, KnowledgeDocumentUpdateDTO requestParam) {
+        KnowledgeDocumentDO documentDO = documentMapper.selectById(docId);
+        Assert.notNull(documentDO, () -> new ClientException("文档不存在"));
+        bizChangeLogContext.putName(documentDO.getDocName());
+        KnowledgeDocumentDO before = BeanUtil.copyProperties(documentDO, KnowledgeDocumentDO.class);
+
+        // 禁止在文档分块运行时修改
+        if (DocumentStatus.RUNNING.getCode().equals(documentDO.getStatus())) {
+            throw new ClientException("文档正在分块中，无法修改");
+        }
+
+        String docName = requestParam == null ? null : requestParam.getDocName();
+        if (!StringUtils.hasText(docName)) {
+            throw new ClientException("文档名称不能为空");
+        }
+
+        LambdaUpdateWrapper<KnowledgeDocumentDO> updateWrapper = Wrappers.lambdaUpdate(KnowledgeDocumentDO.class)
+                .eq(KnowledgeDocumentDO::getId, documentDO.getId())
+                .set(KnowledgeDocumentDO::getDocName, docName.trim())
+                .set(KnowledgeDocumentDO::getUpdatedBy, UserContext.getUsername());
+
+        // 如果传了 processMode，校验并更新处理配置
+        if (StringUtils.hasText(requestParam.getProcessMode())) {
+            ProcessMode processMode = ProcessMode.normalize(requestParam.getProcessMode());
+            updateWrapper.set(KnowledgeDocumentDO::getProcessMode, processMode.getValue());
+
+            if (ProcessMode.CHUNK == processMode) {
+                String spec = ingestionSpecCodec.normalize(requestParam.getIngestionSpec());
+                updateWrapper.setSql("ingestion_spec = CAST({0} AS jsonb)", spec);
+                updateWrapper.set(KnowledgeDocumentDO::getPipelineId, null);
+            }
+            else {
+                if (!StringUtils.hasText(requestParam.getPipelineId())) {
+                    throw new ClientException("使用Pipeline模式时，必须指定Pipeline ID");
+                }
+                try {
+                    ingestionPipelineService.get(requestParam.getPipelineId());
+                }
+                catch (Exception e) {
+                    throw new ClientException("指定的Pipeline不存在: " + requestParam.getPipelineId());
+                }
+                updateWrapper.set(KnowledgeDocumentDO::getPipelineId, requestParam.getPipelineId());
+                updateWrapper.set(KnowledgeDocumentDO::getIngestionSpec, null);
+            }
+        }
+
+        // 处理定时调度相关字段（仅 URL 类型文档支持）
+        boolean scheduleChanged = false;
+        if (SourceType.URL.getValue().equalsIgnoreCase(documentDO.getSourceType())) {
+            String newSourceLocation = requestParam.getSourceLocation();
+            Integer newScheduleEnabled = requestParam.getScheduleEnabled();
+            String newScheduleCron = requestParam.getScheduleCron();
+
+            if (StringUtils.hasText(newSourceLocation)) {
+                updateWrapper.set(KnowledgeDocumentDO::getSourceLocation, newSourceLocation.trim());
+                scheduleChanged = true;
+            }
+            if (newScheduleEnabled != null) {
+                updateWrapper.set(KnowledgeDocumentDO::getScheduleEnabled, newScheduleEnabled);
+                scheduleChanged = true;
+            }
+            if (StringUtils.hasText(newScheduleCron)) {
+                try {
+                    CronScheduleHelper.nextRunTime(newScheduleCron, new Date());
+                    // 验证 cron 周期不能太短（与 upsertSchedule 保持一致）
+                    if (CronScheduleHelper.isIntervalLessThan(newScheduleCron, new Date(), 60)) {
+                        throw new ClientException("定时周期不能小于 60 秒");
+                    }
+                }
+                catch (IllegalArgumentException e) {
+                    throw new ClientException("定时表达式不合法: " + e.getMessage());
+                }
+                updateWrapper.set(KnowledgeDocumentDO::getScheduleCron, newScheduleCron.trim());
+                scheduleChanged = true;
+            }
+
+            // 验证：启用定时拉取时必须有 cron 和 sourceLocation
+            if (scheduleChanged) {
+                KnowledgeDocumentDO willBe = documentMapper.selectById(docId);
+                Integer finalEnabled = newScheduleEnabled != null ? newScheduleEnabled : willBe.getScheduleEnabled();
+                String finalCron = StringUtils.hasText(newScheduleCron) ? newScheduleCron.trim() : willBe.getScheduleCron();
+                String finalLocation = StringUtils.hasText(newSourceLocation) ? newSourceLocation.trim() : willBe.getSourceLocation();
+
+                if (finalEnabled != null && finalEnabled == 1) {
+                    if (!StringUtils.hasText(finalCron)) {
+                        throw new ClientException("启用定时拉取时必须设置定时表达式");
+                    }
+                    if (!StringUtils.hasText(finalLocation)) {
+                        throw new ClientException("启用定时拉取时必须设置来源地址");
+                    }
+                }
+            }
+        }
+
+        documentMapper.update(updateWrapper);
+
+        if (scheduleChanged) {
+            KnowledgeDocumentDO updated = documentMapper.selectById(docId);
+            scheduleService.upsertSchedule(updated);
+        }
+        bizChangeLogContext.put(docId, before, documentMapper.selectById(docId));
+    }
+
+    @Override
+    public IPage<KnowledgeDocumentVO> page(String kbId, KnowledgeDocumentPageDTO requestParam) {
+        Page<KnowledgeDocumentDO> pageParam = new Page<>(requestParam.getCurrent(), requestParam.getSize());
+        LambdaQueryWrapper<KnowledgeDocumentDO> queryWrapper = Wrappers.lambdaQuery(KnowledgeDocumentDO.class)
+                .eq(KnowledgeDocumentDO::getKbId, kbId)
+                .eq(KnowledgeDocumentDO::getDeleted, 0)
+                .like(requestParam.getKeyword() != null && !requestParam.getKeyword().isBlank(), KnowledgeDocumentDO::getDocName, requestParam.getKeyword())
+                .eq(requestParam.getStatus() != null && !requestParam.getStatus().isBlank(), KnowledgeDocumentDO::getStatus, requestParam.getStatus())
+                .orderByDesc(KnowledgeDocumentDO::getCreateTime);
+
+        IPage<KnowledgeDocumentVO> result = documentMapper.selectPage(pageParam, queryWrapper)
+                .convert(this::toVO);
+
+        List<String> docIds = result.getRecords().stream()
+                .map(KnowledgeDocumentVO::getId)
+                .collect(Collectors.toList());
+        Set<String> editedDocIds = findEditedDocIds(docIds);
+        result.getRecords().forEach(vo -> vo.setChunksEdited(editedDocIds.contains(vo.getId())));
+
+        return result;
+    }
+
+    private Set<String> findEditedDocIds(List<String> docIds) {
+        if (docIds == null || docIds.isEmpty()) {
+            return Collections.emptySet();
+        }
+        QueryWrapper<KnowledgeChunkDO> wrapper = new QueryWrapper<>();
+        wrapper.select("DISTINCT doc_id")
+                .in("doc_id", docIds)
+                .apply("update_time > create_time + INTERVAL '1 second'");
+        return chunkMapper.selectObjs(wrapper).stream()
+                .map(String::valueOf)
+                .collect(Collectors.toSet());
+    }
+
+    @Override
+    @LogRecord(
+            success = "{{#enabled ? '启用' : '禁用'}}文档：{{#bizChangeName}}",
+            fail = "修改文档启用状态失败：{{#_errorMsg}}",
+            type = BizChangeBizType.KNOWLEDGE_DOCUMENT,
+            subType = "{{#enabled ? 'ENABLE' : 'DISABLE'}}",
+            bizNo = "{{#docId}}",
+            extra = BizChangeLogContext.SNAPSHOT_EXPRESSION,
+            condition = BizChangeLogContext.RECORD_CONDITION
+    )
+    public void enable(String docId, boolean enabled) {
+        KnowledgeDocumentDO documentDO = documentMapper.selectById(docId);
+        Assert.notNull(documentDO, () -> new ClientException("文档不存在"));
+        bizChangeLogContext.putName(documentDO.getDocName());
+        KnowledgeDocumentDO before = BeanUtil.copyProperties(documentDO, KnowledgeDocumentDO.class);
+
+        // 禁止在文档分块运行时修改
+        if (DocumentStatus.RUNNING.getCode().equals(documentDO.getStatus())) {
+            throw new ClientException("文档正在分块中，无法修改");
+        }
+
+        // 如果已经是目标状态，直接返回
+        int targetEnabled = enabled ? 1 : 0;
+        if (documentDO.getEnabled() != null && documentDO.getEnabled() == targetEnabled) {
+            bizChangeLogContext.skip();
+            return;
+        }
+
+        // 提前查知识库，两个分支都需要，避免重复查询
+        KnowledgeBaseDO kbDO = knowledgeBaseMapper.selectById(documentDO.getKbId());
+        String collectionName = kbDO.getCollectionName();
+
+        // 启用时：embed 耗时较长，在事务外提前执行，避免长事务占用连接
+        List<EmbeddedChunk> vectorChunks = Collections.emptyList();
+        if (enabled) {
+            // 向量文本取库里那份，不用展示文本重新组装——否则章节路径与表格 KV 渲染会静默丢失
+            vectorChunks = knowledgeChunkService.embedPersistedChunks(docId, vectorTargetResolver.resolve(kbDO));
+            if (CollUtil.isEmpty(vectorChunks)) {
+                log.warn("启用文档时未找到任何 Chunk，仅更新启用状态并跳过向量重建，docId={}", docId);
+            }
+        }
+
+        final List<EmbeddedChunk> finalEmbeddedChunks = vectorChunks;
+        transactionOperations.executeWithoutResult(status -> {
+            documentDO.setEnabled(targetEnabled);
+            documentDO.setUpdatedBy(UserContext.getUsername());
+            documentMapper.updateById(documentDO);
+            scheduleService.syncScheduleIfExists(documentDO);
+            knowledgeChunkService.updateEnabledByDocId(docId, String.valueOf(kbDO.getId()), enabled);
+
+            if (!enabled) {
+                vectorStoreService.deleteDocumentVectors(collectionName, docId);
+            }
+            else if (CollUtil.isNotEmpty(finalEmbeddedChunks)) {
+                vectorStoreService.indexDocumentChunks(collectionName, docId, finalEmbeddedChunks);
+            }
+        });
+        bizChangeLogContext.put(docId, before, documentMapper.selectById(docId));
+    }
+
+    @Override
+    public List<KnowledgeDocumentSearchVO> search(String keyword, int limit) {
+        if (!StringUtils.hasText(keyword)) {
+            return Collections.emptyList();
+        }
+
+        int size = Math.min(Math.max(limit, 1), 20);
+        Page<KnowledgeDocumentDO> mpPage = new Page<>(1, size);
+        LambdaQueryWrapper<KnowledgeDocumentDO> qw = new LambdaQueryWrapper<KnowledgeDocumentDO>()
+                .eq(KnowledgeDocumentDO::getDeleted, 0)
+                .like(KnowledgeDocumentDO::getDocName, keyword)
+                .orderByDesc(KnowledgeDocumentDO::getUpdateTime);
+
+        IPage<KnowledgeDocumentDO> result = documentMapper.selectPage(mpPage, qw);
+        List<KnowledgeDocumentSearchVO> records = result.getRecords().stream()
+                .map(each -> BeanUtil.toBean(each, KnowledgeDocumentSearchVO.class))
+                .toList();
+        if (records.isEmpty()) {
+            return records;
+        }
+
+        Set<String> kbIds = new HashSet<>();
+        for (KnowledgeDocumentSearchVO record : records) {
+            if (record.getKbId() != null) {
+                kbIds.add(record.getKbId());
+            }
+        }
+        if (kbIds.isEmpty()) {
+            return records;
+        }
+
+        List<KnowledgeBaseDO> bases = knowledgeBaseMapper.selectByIds(kbIds);
+        Map<String, String> nameMap = new HashMap<>();
+        if (bases != null) {
+            for (KnowledgeBaseDO base : bases) {
+                nameMap.put(base.getId(), base.getName());
+            }
+        }
+        for (KnowledgeDocumentSearchVO record : records) {
+            record.setKbName(nameMap.get(record.getKbId()));
+        }
+        return records;
+    }
+
+    public IPage<KnowledgeDocumentChunkLogVO> getChunkLogs(String docId, Page<KnowledgeDocumentChunkLogVO> page) {
+        Page<KnowledgeDocumentChunkLogDO> mpPage = new Page<>(page.getCurrent(), page.getSize());
+        LambdaQueryWrapper<KnowledgeDocumentChunkLogDO> qw = new LambdaQueryWrapper<KnowledgeDocumentChunkLogDO>()
+                .eq(KnowledgeDocumentChunkLogDO::getDocId, docId)
+                .orderByDesc(KnowledgeDocumentChunkLogDO::getCreateTime);
+
+        IPage<KnowledgeDocumentChunkLogDO> result = chunkLogMapper.selectPage(mpPage, qw);
+
+        List<KnowledgeDocumentChunkLogDO> records = result.getRecords();
+        Map<String, String> pipelineNameMap = new HashMap<>();
+        if (CollUtil.isNotEmpty(records)) {
+            Set<String> pipelineIds = new HashSet<>();
+            for (KnowledgeDocumentChunkLogDO record : records) {
+                if (record.getPipelineId() != null) {
+                    pipelineIds.add(record.getPipelineId());
+                }
+            }
+            if (!pipelineIds.isEmpty()) {
+                List<IngestionPipelineDO> pipelines = ingestionPipelineMapper.selectByIds(pipelineIds);
+                if (CollUtil.isNotEmpty(pipelines)) {
+                    for (IngestionPipelineDO pipeline : pipelines) {
+                        pipelineNameMap.put(pipeline.getId(), pipeline.getName());
+                    }
+                }
+            }
+        }
+
+        Page<KnowledgeDocumentChunkLogVO> voPage = new Page<>(result.getCurrent(), result.getSize(), result.getTotal());
+        voPage.setRecords(records.stream().map(each -> {
+            KnowledgeDocumentChunkLogVO vo = BeanUtil.toBean(each, KnowledgeDocumentChunkLogVO.class);
+            if (each.getPipelineId() != null) {
+                vo.setPipelineName(pipelineNameMap.get(each.getPipelineId()));
+            }
+            Long totalDuration = each.getTotalDuration();
+            if (totalDuration != null) {
+                long other = getOther(each, totalDuration);
+                vo.setOtherDuration(Math.max(0, other));
+            }
+            return vo;
+        }).toList());
+        return voPage;
+    }
+
+    private static long getOther(KnowledgeDocumentChunkLogDO each, Long totalDuration) {
+        String mode = each.getProcessMode();
+        boolean pipelineMode = ProcessMode.PIPELINE.getValue().equalsIgnoreCase(mode);
+        long extract = each.getExtractDuration() == null ? 0 : each.getExtractDuration();
+        long chunk = each.getChunkDuration() == null ? 0 : each.getChunkDuration();
+        long embed = each.getEmbedDuration() == null ? 0 : each.getEmbedDuration();
+        long persist = each.getPersistDuration() == null ? 0 : each.getPersistDuration();
+        return pipelineMode
+                ? totalDuration - chunk - persist
+                : totalDuration - extract - chunk - embed - persist;
+    }
+
+    @Override
+    public String preview(String docId) {
+        KnowledgeDocumentDO documentDO = documentMapper.selectById(docId);
+        Assert.notNull(documentDO, () -> new ClientException("文档不存在"));
+        if (DisplayType.from(documentDO.getFileType()) != DisplayType.MARKDOWN) {
+            throw new ClientException("仅支持预览 markdown 格式文档");
+        }
+        try (InputStream in = fileStorageService.openStream(documentDO.getFileUrl())) {
+            return new String(in.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+        } catch (ClientException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new ClientException("读取文档内容失败: " + e.getMessage());
+        }
     }
 }
 
