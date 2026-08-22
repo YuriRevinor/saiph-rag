@@ -46,6 +46,7 @@ import com.yurirvs.saiph.knowledge.enums.SourceType;
 import com.yurirvs.saiph.knowledge.handler.RemoteFileFetcher;
 import com.yurirvs.saiph.knowledge.mq.event.KnowledgeDocumentChunkEvent;
 import com.yurirvs.saiph.knowledge.schedule.CronScheduleHelper;
+import com.yurirvs.saiph.knowledge.service.KnowledgeChunkService;
 import com.yurirvs.saiph.knowledge.service.KnowledgeDocumentScheduleService;
 import com.yurirvs.saiph.knowledge.service.KnowledgeDocumentService;
 import com.yurirvs.saiph.knowledge.support.IngestionSpecCodec;
