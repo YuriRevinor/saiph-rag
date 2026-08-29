@@ -1,6 +1,7 @@
 package com.yurirvs.saiph.rag.service.pipeline;
 
 import com.yurirvs.saiph.framework.convention.ChatMessage;
+import com.yurirvs.saiph.rag.core.memory.ConversationMemoryService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
