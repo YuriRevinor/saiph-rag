@@ -2,6 +2,8 @@ package com.yurirvs.saiph.rag.service.pipeline;
 
 import com.yurirvs.saiph.framework.convention.ChatMessage;
 import com.yurirvs.saiph.rag.core.memory.ConversationMemoryService;
+import com.yurirvs.saiph.rag.core.rewrite.QueryRewriteService;
+import com.yurirvs.saiph.rag.core.rewrite.RewriteResult;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -23,9 +25,11 @@ import java.util.List;
 public class StreamChatPipeline {
 
     private final ConversationMemoryService memoryService;
+    private final QueryRewriteService queryRewriteService;
 
     public void execute(StreamChatContext ctx) {
         loadMemory(ctx);
+        rewriteQuery(ctx);
 
 
 
@@ -37,5 +41,10 @@ public class StreamChatPipeline {
                 ctx.getConversationId(), ctx.getUserId(), ChatMessage.user(ctx.getQuestion()));
         ctx.getCallback().onReplyToMessageId(questionMessageId);
         ctx.setHistory(history);
+    }
+
+    private void rewriteQuery(StreamChatContext ctx) {
+        RewriteResult rewriteResult = queryRewriteService.rewriteWithSplit(ctx.getQuestion(), ctx.getHistory());
+        ctx.setRewriteResult(rewriteResult);
     }
 }
