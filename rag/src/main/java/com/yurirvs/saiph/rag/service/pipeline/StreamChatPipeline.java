@@ -1,9 +1,14 @@
 package com.yurirvs.saiph.rag.service.pipeline;
 
 import com.yurirvs.saiph.framework.convention.ChatMessage;
+import com.yurirvs.saiph.infra.chat.StreamCallback;
+import com.yurirvs.saiph.rag.core.guidance.GuidanceDecision;
+import com.yurirvs.saiph.rag.core.guidance.IntentGuidanceService;
+import com.yurirvs.saiph.rag.core.intent.IntentResolver;
 import com.yurirvs.saiph.rag.core.memory.ConversationMemoryService;
 import com.yurirvs.saiph.rag.core.rewrite.QueryRewriteService;
 import com.yurirvs.saiph.rag.core.rewrite.RewriteResult;
+import com.yurirvs.saiph.rag.dto.SubQuestionIntent;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -26,13 +31,17 @@ public class StreamChatPipeline {
 
     private final ConversationMemoryService memoryService;
     private final QueryRewriteService queryRewriteService;
+    private final IntentResolver intentResolver;
+    private final IntentGuidanceService guidanceService;
 
     public void execute(StreamChatContext ctx) {
         loadMemory(ctx);
         rewriteQuery(ctx);
+        resolveIntents(ctx);
 
-
-
+        if (handleGuidance(ctx)) {
+            return;
+        }
     }
 
     private void loadMemory(StreamChatContext ctx) {
@@ -46,5 +55,24 @@ public class StreamChatPipeline {
     private void rewriteQuery(StreamChatContext ctx) {
         RewriteResult rewriteResult = queryRewriteService.rewriteWithSplit(ctx.getQuestion(), ctx.getHistory());
         ctx.setRewriteResult(rewriteResult);
+    }
+
+    private void resolveIntents(StreamChatContext ctx) {
+        List<SubQuestionIntent> subIntents = intentResolver.resolve(ctx.getRewriteResult());
+        ctx.setSubIntents(subIntents);
+    }
+
+    private boolean handleGuidance(StreamChatContext ctx) {
+        GuidanceDecision decision = guidanceService.detectAmbiguity(
+                ctx.getRewriteResult().rewrittenQuestion(),
+                ctx.getSubIntents()
+        );
+        if (!decision.isPrompt()) {
+            return false;
+        }
+        StreamCallback callback = ctx.getCallback();
+        callback.onContent(decision.getPrompt());
+        callback.onComplete();
+        return true;
     }
 }
