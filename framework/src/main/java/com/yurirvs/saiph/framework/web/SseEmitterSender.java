@@ -67,7 +67,7 @@ public class SseEmitterSender {
      *
      * @param e
      */
-    public void fail(IOException e) {
+    public void fail(Throwable e) {
         if (closed.compareAndSet(false, true)) {
             sseEmitter.completeWithError(e);
             Log.warn("SSEEmitter has error", e);

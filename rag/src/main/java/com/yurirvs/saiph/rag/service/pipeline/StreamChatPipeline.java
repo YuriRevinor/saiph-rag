@@ -4,6 +4,7 @@ import cn.hutool.core.collection.CollUtil;
 import cn.hutool.core.util.StrUtil;
 import com.yurirvs.saiph.framework.convention.ChatMessage;
 import com.yurirvs.saiph.framework.convention.ChatRequest;
+import com.yurirvs.saiph.framework.convention.SourceRef;
 import com.yurirvs.saiph.infra.chat.LLMService;
 import com.yurirvs.saiph.infra.chat.StreamCallback;
 import com.yurirvs.saiph.infra.chat.StreamCancellationHandle;
@@ -13,9 +14,15 @@ import com.yurirvs.saiph.rag.core.intent.IntentResolver;
 import com.yurirvs.saiph.rag.core.memory.ConversationMemoryService;
 import com.yurirvs.saiph.rag.core.prompt.AgentPromptResolver;
 import com.yurirvs.saiph.rag.core.prompt.AgentPromptSlot;
+import com.yurirvs.saiph.rag.core.prompt.PromptContext;
+import com.yurirvs.saiph.rag.core.prompt.RAGPromptService;
 import com.yurirvs.saiph.rag.core.retrieval.RetrievalEngine;
 import com.yurirvs.saiph.rag.core.rewrite.QueryRewriteService;
 import com.yurirvs.saiph.rag.core.rewrite.RewriteResult;
+import com.yurirvs.saiph.rag.core.source.CitationContextEnricher;
+import com.yurirvs.saiph.rag.core.source.GroundingChunksAssembler;
+import com.yurirvs.saiph.rag.core.source.SourcesAssembler;
+import com.yurirvs.saiph.rag.dto.IntentGroup;
 import com.yurirvs.saiph.rag.dto.SubQuestionIntent;
 import com.yurirvs.saiph.rag.dto.RetrievalContext;
 import com.yurirvs.saiph.rag.service.handler.StreamTaskManager;
@@ -48,6 +55,10 @@ public class StreamChatPipeline {
     private final LLMService llmService;
     private final AgentPromptResolver agentPromptResolver;
     private final StreamTaskManager taskManager;
+    private final SourcesAssembler sourcesAssembler;
+    private final GroundingChunksAssembler groundingChunksAssembler;
+    private final CitationContextEnricher citationContextEnricher;
+    private final RAGPromptService promptBuilder;
 
     public void execute(StreamChatContext ctx) {
         loadMemory(ctx);
@@ -62,6 +73,11 @@ public class StreamChatPipeline {
         }
 
         RetrievalContext retrievalCtx = retrieve(ctx);
+        if (handleEmptyRetrieval(ctx, retrievalCtx)) {
+            return;
+        }
+
+        streamRagResponse(ctx, retrievalCtx);
     }
 
     private void loadMemory(StreamChatContext ctx) {
@@ -142,5 +158,67 @@ public class StreamChatPipeline {
                 .thinking(false)
                 .build();
         return llmService.streamChat(req, callback);
+    }
+
+    private boolean handleEmptyRetrieval(StreamChatContext ctx, RetrievalContext retrievalCtx) {
+        if (!retrievalCtx.isEmpty()) {
+            return false;
+        }
+        StreamCallback callback = ctx.getCallback();
+        callback.onContent("未检索到与问题相关的文档内容。");
+        callback.onComplete();
+        return true;
+    }
+
+    private void streamRagResponse(StreamChatContext ctx, RetrievalContext retrievalCtx) {
+        // 聚合所有意图用于 prompt 规划
+        IntentGroup mergedGroup = intentResolver.mergeIntentGroup(ctx.getSubIntents());
+
+        // 检索完成后建立唯一来源编号：同一列表用于完成事件、来源面板与消息落库，开启引用时还作为行内角标编号
+        List<SourceRef> sources = sourcesAssembler.assemble(retrievalCtx.getIntentChunks());
+        ctx.getCallback().onSources(sources);
+        // 开关关闭时这一步只负责清掉上下文里的内部 docId，不注入编号
+        retrievalCtx.setKbContext(citationContextEnricher.enrich(retrievalCtx.getKbContext(), sources));
+
+        // 装配 grounding 片段随消息落库 供答案后推荐追问生成 grounding（不参与 prompt）
+        ctx.getCallback().onGroundingChunks(groundingChunksAssembler.assemble(retrievalCtx.getIntentChunks()));
+
+        StreamCancellationHandle handle = streamLLMResponse(
+                ctx.getRewriteResult(),
+                retrievalCtx,
+                mergedGroup,
+                ctx.getHistory(),
+                ctx.isDeepThinking(),
+                ctx.getCallback()
+        );
+        taskManager.bindHandle(ctx.getTaskId(), handle);
+    }
+
+    private StreamCancellationHandle streamLLMResponse(RewriteResult rewriteResult, RetrievalContext ctx,
+                                                       IntentGroup intentGroup, List<ChatMessage> history,
+                                                       boolean deepThinking, StreamCallback callback) {
+        PromptContext promptContext = PromptContext.builder()
+                .question(rewriteResult.rewrittenQuestion())
+                .mcpContext(ctx.getMcpContext())
+                .kbContext(ctx.getKbContext())
+                .mcpIntents(intentGroup.mcpIntents())
+                .kbIntents(intentGroup.kbIntents())
+                .eligibleIntentIds(ctx.getEligibleIntentIds())
+                .build();
+
+        List<ChatMessage> messages = promptBuilder.buildStructuredMessages(
+                promptContext,
+                history,
+                rewriteResult.rewrittenQuestion(),
+                rewriteResult.subQuestions()  // 传入子问题列表
+        );
+        ChatRequest chatRequest = ChatRequest.builder()
+                .messages(messages)
+                .thinking(deepThinking)
+                .temperature(ctx.hasMcp() ? 0.3D : 0D)  // MCP 场景稍微放宽温度
+                .topP(ctx.hasMcp() ? 0.8D : 1D)
+                .build();
+
+        return llmService.streamChat(chatRequest, callback);
     }
 }
